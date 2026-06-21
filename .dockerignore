@@ -1,0 +1,16 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+config.env
+.env
+log.txt
+downloads
+Thumbnails
+MediaInfo
+accounts
+rclone
+*.session
+*.pickle
+*.zip
