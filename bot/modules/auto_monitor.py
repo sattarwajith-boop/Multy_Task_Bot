@@ -9,13 +9,20 @@ uploads, limits, cancellation, and status reporting remain in one engine.
 import asyncio
 import hashlib
 import os
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from html import escape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
+import cloudscraper
 import feedparser
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import (
+    ClientConnectionError,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+)
 from bs4 import BeautifulSoup
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram.filters import command, regex
@@ -37,12 +44,23 @@ from bot.helper.telegram_helper.message_utils import sendMessage
 from bot.modules.mirror_leech import leech, qb_leech
 
 
-HEADERS = {
-    "User-Agent": (
+USER_AGENTS = [
+    (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-    )
-}
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/17.5 Safari/605.1.15"
+    ),
+]
 DIRECT_RE = re.compile(
     r"\.(torrent|mkv|mp4|avi|mov|webm|m4v|ts|mp3|flac|zip|rar|7z|iso)"
     r"(?:$|[?#])",
@@ -55,6 +73,8 @@ AUTO_ENABLED = os.getenv("AUTO_MONITOR_ENABLED", "true").lower() in {
     "on",
 }
 AUTO_INTERVAL = max(60, int(os.getenv("AUTO_MONITOR_INTERVAL", "900")))
+
+
 def _configured(value):
     return bool(value and value.strip().upper() not in {"CHANGE_ME", "YOUR_VALUE"})
 
@@ -76,6 +96,11 @@ AUTO_LEECH_EXISTING = os.getenv("AUTO_LEECH_EXISTING", "false").lower() in {
     "yes",
     "on",
 }
+AUTO_FETCH_RETRIES = max(1, int(os.getenv("AUTO_FETCH_RETRIES", "3")))
+AUTO_FETCH_TIMEOUT = max(10, int(os.getenv("AUTO_FETCH_TIMEOUT", "35")))
+AUTO_SITE_COOKIE = os.getenv("AUTO_SITE_COOKIE", "").strip()
+AUTO_SITE_PROXY = os.getenv("AUTO_SITE_PROXY", "").strip()
+AUTO_SITE_PROXY = AUTO_SITE_PROXY if _configured(AUTO_SITE_PROXY) else ""
 AUTO_FORWARD_CHATS = [
     value.strip()
     for value in re.split(r"[\s,]+", os.getenv("AUTO_FORWARD_CHATS", ""))
@@ -100,6 +125,10 @@ _check_lock = asyncio.Lock()
 _mv_cache = {}
 
 
+class SiteBlockedError(RuntimeError):
+    """The remote site rejected all browser-like request attempts."""
+
+
 def _key(value):
     return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()
 
@@ -111,12 +140,103 @@ def _clean_title(value):
     return re.sub(r"[\W_]+", " ", value).strip()
 
 
+def _canonical_url(url):
+    parsed = urlparse(url.strip())
+    scheme = parsed.scheme.lower() or "https"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return url.strip()
+    port = f":{parsed.port}" if parsed.port else ""
+    path = re.sub(r"/+", "/", parsed.path or "")
+    if path == "/":
+        path = ""
+    else:
+        path = path.rstrip("/")
+    return urlunparse((scheme, host + port, path, "", parsed.query, ""))
+
+
+def _request_headers(url):
+    parsed = urlparse(url)
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if AUTO_SITE_COOKIE:
+        headers["Cookie"] = AUTO_SITE_COOKIE
+    return headers
+
+
+def _cloudscraper_fetch(url):
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    )
+    response = scraper.get(
+        url,
+        headers=_request_headers(url),
+        timeout=AUTO_FETCH_TIMEOUT,
+        allow_redirects=True,
+        proxies=(
+            {"http": AUTO_SITE_PROXY, "https": AUTO_SITE_PROXY}
+            if AUTO_SITE_PROXY
+            else None
+        ),
+    )
+    if response.status_code in {403, 429, 503, 999}:
+        raise SiteBlockedError(
+            f"site blocked Koyeb after browser fallback (HTTP {response.status_code})"
+        )
+    response.raise_for_status()
+    return response.text, response.url
+
+
 async def _fetch(url):
-    timeout = ClientTimeout(total=35)
-    async with ClientSession(headers=HEADERS, timeout=timeout) as session:
-        async with session.get(url, allow_redirects=True) as response:
-            response.raise_for_status()
-            return await response.text(errors="replace"), str(response.url)
+    url = _canonical_url(url)
+    timeout = ClientTimeout(total=AUTO_FETCH_TIMEOUT)
+    last_error = None
+    for attempt in range(AUTO_FETCH_RETRIES):
+        try:
+            async with ClientSession(
+                headers=_request_headers(url),
+                timeout=timeout,
+                trust_env=True,
+            ) as session:
+                async with session.get(
+                    url,
+                    allow_redirects=True,
+                    proxy=AUTO_SITE_PROXY or None,
+                ) as response:
+                    if response.status in {403, 429, 503, 999}:
+                        raise SiteBlockedError(
+                            f"site rejected request with HTTP {response.status}"
+                        )
+                    response.raise_for_status()
+                    return await response.text(errors="replace"), str(response.url)
+        except (
+            ClientConnectionError,
+            ClientResponseError,
+            asyncio.TimeoutError,
+            SiteBlockedError,
+        ) as error:
+            last_error = error
+            if attempt + 1 < AUTO_FETCH_RETRIES:
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+    try:
+        return await asyncio.to_thread(_cloudscraper_fetch, url)
+    except Exception as error:
+        last_error = error
+    raise SiteBlockedError(
+        f"unable to fetch {url}: {last_error}. "
+        "The site may block Koyeb IPs; set AUTO_SITE_COOKIE or AUTO_SITE_PROXY."
+    ) from last_error
 
 
 async def _scrape_rss(url):
@@ -141,6 +261,8 @@ async def _scrape_rss(url):
 async def _scrape_detail(url):
     try:
         html, final_url = await _fetch(url)
+    except SiteBlockedError:
+        raise
     except Exception as error:
         LOGGER.warning("Auto monitor detail fetch failed for %s: %s", url, error)
         return []
@@ -178,9 +300,19 @@ async def _scrape_html(url):
             detail_pages.append((title, resolved))
     if results:
         return _dedupe(results)[:AUTO_MAX_ITEMS]
+    blocked_pages = 0
     for title, page in list(dict.fromkeys(detail_pages))[:AUTO_MAX_ITEMS]:
-        for link in await _scrape_detail(page):
+        try:
+            links = await _scrape_detail(page)
+        except SiteBlockedError:
+            blocked_pages += 1
+            continue
+        for link in links:
             results.append({"title": title, "url": link, "page_url": page})
+    if not results and blocked_pages:
+        raise SiteBlockedError(
+            f"site listing opened, but {blocked_pages} detail page(s) were blocked"
+        )
     return _dedupe(results)
 
 
@@ -199,9 +331,19 @@ async def _scrape_mv(url):
             if text and urlparse(href).netloc == urlparse(final_url).netloc:
                 topics.append((text, href))
     results = []
+    blocked_pages = 0
     for title, page in list(dict.fromkeys(topics))[:AUTO_MAX_ITEMS]:
-        for link in await _scrape_detail(page):
+        try:
+            links = await _scrape_detail(page)
+        except SiteBlockedError:
+            blocked_pages += 1
+            continue
+        for link in links:
             results.append({"title": title, "url": link, "page_url": page})
+    if not results and blocked_pages:
+        raise SiteBlockedError(
+            f"MV listing opened, but {blocked_pages} release page(s) were blocked"
+        )
     return _dedupe(results)
 
 
@@ -308,16 +450,52 @@ async def _dispatch(item):
 async def _ensure_indexes():
     if _db is None:
         return
+    sites = await _db.sites.find({}).sort("created_at", 1).to_list(length=None)
+    canonical_sites = {}
+    for site in sites:
+        canonical = _canonical_url(site["url"])
+        canonical_sites.setdefault(canonical, []).append(site)
+    for canonical, duplicates in canonical_sites.items():
+        keeper = duplicates[0]
+        if len(duplicates) > 1:
+            merged_enabled = any(site.get("enabled", True) for site in duplicates)
+            merged_initialized = any(
+                site.get("initialized", False) for site in duplicates
+            )
+            merged_type = (
+                "mv"
+                if any(site.get("type") == "mv" for site in duplicates)
+                else keeper.get("type", "auto")
+            )
+            for duplicate in duplicates[1:]:
+                await _db.sites.delete_one({"_id": duplicate["_id"]})
+                LOGGER.info(
+                    "Removed duplicate monitored site URL: %s", duplicate["url"]
+                )
+            await _db.sites.update_one(
+                {"_id": keeper["_id"]},
+                {"$set": {
+                    "enabled": merged_enabled,
+                    "initialized": merged_initialized,
+                    "type": merged_type,
+                }},
+            )
+        if canonical != keeper["url"]:
+            await _db.sites.update_one(
+                {"_id": keeper["_id"]}, {"$set": {"url": canonical}}
+            )
     await _db.sites.create_index("url", unique=True)
     await _db.items.create_index("key", unique=True)
     if MV_SITE_URL:
+        canonical_mv = _canonical_url(MV_SITE_URL)
         await _db.sites.update_one(
-            {"url": MV_SITE_URL},
+            {"url": canonical_mv},
             {"$setOnInsert": {
-                "url": MV_SITE_URL,
+                "url": canonical_mv,
                 "name": "MV",
                 "type": "mv",
                 "enabled": True,
+                "initialized": False,
                 "created_at": datetime.now(timezone.utc),
             }},
             upsert=True,
@@ -328,11 +506,11 @@ async def _run_check(force=False):
     if _db is None:
         raise RuntimeError("DATABASE_URL is required for auto monitoring")
     if _check_lock.locked() and not force:
-        return {"sites": 0, "new": 0, "errors": 0}
+        return {"sites": 0, "new": 0, "blocked": 0, "errors": 0}
     async with _check_lock:
         await _ensure_indexes()
         sites = await _db.sites.find({"enabled": True}).to_list(length=None)
-        stats = {"sites": len(sites), "new": 0, "errors": 0}
+        stats = {"sites": len(sites), "new": 0, "blocked": 0, "errors": 0}
         for site in sites:
             try:
                 items = await _scrape(site)
@@ -403,6 +581,19 @@ async def _run_check(force=False):
                         "last_error": "",
                     }},
                 )
+            except SiteBlockedError as error:
+                stats["blocked"] += 1
+                LOGGER.warning("Auto monitor blocked for %s: %s", site.get("url"), error)
+                await _db.sites.update_one(
+                    {"_id": site["_id"]},
+                    {
+                        "$set": {
+                            "last_checked": datetime.now(timezone.utc),
+                            "last_error": str(error)[:500],
+                        },
+                        "$inc": {"blocked_count": 1},
+                    },
+                )
             except Exception as error:
                 stats["errors"] += 1
                 LOGGER.exception("Auto monitor failed for %s", site.get("url"))
@@ -441,7 +632,7 @@ async def add_site(_, message):
     parts = message.text.split(maxsplit=3)
     if len(parts) < 2:
         return await sendMessage(message, "Usage: /addsite URL [auto|rss|html|mv] [name]")
-    url = parts[1].strip()
+    url = _canonical_url(parts[1])
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return await sendMessage(message, "Site URL must start with http:// or https://")
@@ -483,7 +674,7 @@ async def delete_site(_, message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         return await sendMessage(message, "Usage: /delsite URL")
-    result = await _db.sites.delete_one({"url": parts[1].strip()})
+    result = await _db.sites.delete_one({"url": _canonical_url(parts[1])})
     await sendMessage(message, "Site removed." if result.deleted_count else "Site not found.")
 
 
@@ -494,7 +685,8 @@ async def check_sites(_, message):
         stats = await _run_check(force=True)
         await status.edit_text(
             f"<b>Check complete</b>\nSites: {stats['sites']}\n"
-            f"New tasks: {stats['new']}\nErrors: {stats['errors']}"
+            f"New tasks: {stats['new']}\n"
+            f"Blocked: {stats['blocked']}\nErrors: {stats['errors']}"
         )
     except Exception as error:
         await status.edit_text(f"Check failed: <code>{escape(str(error))}</code>")

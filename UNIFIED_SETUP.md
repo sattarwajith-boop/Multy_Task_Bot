@@ -96,6 +96,21 @@ Some sites use Cloudflare, JavaScript challenges, login cookies, or frequently
 change their HTML. Those sites need a dedicated scraper and cannot be promised
 to work permanently from a generic parser.
 
+The monitor retries transient failures and then uses a browser-compatible
+fallback. If a site still blocks Koyeb:
+
+- Set `AUTO_SITE_COOKIE` to a valid browser Cookie header copied from your own
+  authorized session.
+- Or set `AUTO_SITE_PROXY` to an HTTP/HTTPS proxy URL.
+- `AUTO_FETCH_RETRIES` and `AUTO_FETCH_TIMEOUT` control retry behavior.
+
+Site URLs are normalized, so forms such as `https://example.com` and
+`https://example.com/` are merged instead of being monitored twice.
+
+On Koyeb Free, keep `TELEGRAM_WORKERS=8`, `TELEGRAM_TRANSMISSIONS=2`,
+`BOT_MAX_TASKS=2`, and `QUEUE_ALL=2`. Higher values can cause temporary
+`service_unavailable` responses through memory or CPU exhaustion.
+
 ## Verification checklist
 
 1. Run `/addsite` for one permitted test feed.

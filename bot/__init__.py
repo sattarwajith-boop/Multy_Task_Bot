@@ -242,7 +242,7 @@ if len(EXCEP_CHATS) == 0:
 def wztgClient(*args, **kwargs):
     if 'max_concurrent_transmissions' in signature(tgClient.__init__).parameters:
         kwargs['max_concurrent_transmissions'] = max(
-            1, int(environ.get('TELEGRAM_TRANSMISSIONS', '8'))
+            1, int(environ.get('TELEGRAM_TRANSMISSIONS', '2'))
         )
     return tgClient(*args, **kwargs)
 
@@ -865,7 +865,7 @@ else:
     qb_client.app_set_preferences(qb_opt)
 
 log_info("Creating client from BOT_TOKEN")
-telegram_workers = max(1, int(environ.get('TELEGRAM_WORKERS', '32')))
+telegram_workers = max(1, int(environ.get('TELEGRAM_WORKERS', '8')))
 bot = wztgClient('bot', TELEGRAM_API, TELEGRAM_HASH, bot_token=BOT_TOKEN, workers=telegram_workers,
                parse_mode=enums.ParseMode.HTML).start()
 bot_loop = bot.loop
