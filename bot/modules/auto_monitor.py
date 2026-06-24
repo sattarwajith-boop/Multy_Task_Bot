@@ -112,6 +112,7 @@ MV_SITE_URL = os.getenv("MV_SITE_URL", "").strip()
 MV_SITE_URL = MV_SITE_URL if _configured(MV_SITE_URL) else ""
 OMDB_API_KEY = os.getenv("OMDB_API_KEY", "").strip()
 OMDB_API_KEY = OMDB_API_KEY if _configured(OMDB_API_KEY) else ""
+SITE_TYPES = {"auto", "rss", "html", "mv"}
 
 _mongo = (
     AsyncIOMotorClient(
@@ -520,14 +521,36 @@ async def _run_check(force=False):
     async with _check_lock:
         await _ensure_indexes()
         sites = await _db.sites.find({"enabled": True}).to_list(length=None)
-        stats = {"sites": len(sites), "new": 0, "blocked": 0, "errors": 0}
+        stats = {
+            "sites": len(sites),
+            "found": 0,
+            "new": 0,
+            "baseline": 0,
+            "known": 0,
+            "blocked": 0,
+            "errors": 0,
+            "details": [],
+        }
         for site in sites:
+            site_name = site.get("name", site["url"])
+            site_detail = {
+                "name": site_name,
+                "url": site["url"],
+                "found": 0,
+                "new": 0,
+                "baseline": 0,
+                "known": 0,
+                "status": "ok",
+                "error": "",
+            }
             try:
                 items = await _scrape(site)
+                site_detail["found"] = len(items)
+                stats["found"] += len(items)
                 if not site.get("initialized", False) and not AUTO_LEECH_EXISTING:
                     for item in items[:AUTO_MAX_ITEMS]:
                         key = _key(item["url"])
-                        await _db.items.update_one(
+                        result = await _db.items.update_one(
                             {"key": key},
                             {"$setOnInsert": {
                                 "key": key,
@@ -538,6 +561,12 @@ async def _run_check(force=False):
                             }},
                             upsert=True,
                         )
+                        if result.upserted_id is None:
+                            site_detail["known"] += 1
+                            stats["known"] += 1
+                        else:
+                            site_detail["baseline"] += 1
+                            stats["baseline"] += 1
                     await _db.sites.update_one(
                         {"_id": site["_id"]},
                         {"$set": {
@@ -567,6 +596,8 @@ async def _run_check(force=False):
                         upsert=True,
                     )
                     if claim.upserted_id is None:
+                        site_detail["known"] += 1
+                        stats["known"] += 1
                         continue
                     try:
                         await _dispatch(item)
@@ -583,6 +614,7 @@ async def _run_check(force=False):
                         )
                         raise
                     stats["new"] += 1
+                    site_detail["new"] += 1
                 await _db.sites.update_one(
                     {"_id": site["_id"]},
                     {"$set": {
@@ -593,6 +625,8 @@ async def _run_check(force=False):
                 )
             except SiteBlockedError as error:
                 stats["blocked"] += 1
+                site_detail["status"] = "blocked"
+                site_detail["error"] = str(error)[:160]
                 LOGGER.warning("Auto monitor blocked for %s: %s", site.get("url"), error)
                 await _db.sites.update_one(
                     {"_id": site["_id"]},
@@ -606,6 +640,8 @@ async def _run_check(force=False):
                 )
             except Exception as error:
                 stats["errors"] += 1
+                site_detail["status"] = "error"
+                site_detail["error"] = str(error)[:160]
                 LOGGER.exception("Auto monitor failed for %s", site.get("url"))
                 await _db.sites.update_one(
                     {"_id": site["_id"]},
@@ -614,6 +650,8 @@ async def _run_check(force=False):
                         "last_error": str(error)[:500],
                     }},
                 )
+            finally:
+                stats["details"].append(site_detail)
         return stats
 
 
@@ -627,10 +665,15 @@ async def auto_sites(_, message):
     lines = ["<b>Monitored sites</b>"]
     for index, site in enumerate(sites, 1):
         state = "ON" if site.get("enabled", True) else "OFF"
+        last_error = site.get("last_error")
+        last_checked = site.get("last_checked")
+        checked_line = f"\nLast checked: <code>{escape(str(last_checked))}</code>" if last_checked else ""
+        error_line = f"\nLast error: <code>{escape(last_error[:220])}</code>" if last_error else ""
         lines.append(
             f"{index}. <b>{escape(site.get('name', 'Site'))}</b> "
             f"[{state}/{escape(site.get('type', 'auto'))}]\n"
             f"<code>{escape(site['url'])}</code>"
+            f"{checked_line}{error_line}"
         )
     await sendMessage(message, "\n\n".join(lines))
 
@@ -646,10 +689,16 @@ async def add_site(_, message):
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return await sendMessage(message, "Site URL must start with http:// or https://")
-    kind = parts[2].lower() if len(parts) > 2 else "auto"
-    if kind not in {"auto", "rss", "html", "mv"}:
-        return await sendMessage(message, "Type must be auto, rss, html, or mv.")
-    name = parts[3] if len(parts) > 3 else urlparse(url).netloc
+    kind = "auto"
+    name = urlparse(url).netloc
+    if len(parts) > 2:
+        maybe_kind = parts[2].lower()
+        if maybe_kind in SITE_TYPES:
+            kind = maybe_kind
+            if len(parts) > 3:
+                name = parts[3]
+        else:
+            name = " ".join(parts[2:])
     await _db.sites.update_one(
         {"url": url},
         {
@@ -689,6 +738,51 @@ async def delete_site(_, message):
 
 
 @new_task
+async def reset_site(_, message):
+    if _db is None:
+        return await sendMessage(message, "DATABASE_URL is required.")
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await sendMessage(message, "Usage: /resetsite URL")
+    url = _canonical_url(parts[1])
+    site = await _db.sites.find_one({"url": url})
+    if not site:
+        return await sendMessage(message, "Site not found. Check /autosites.")
+    result = await _db.items.delete_many({"site_url": site["url"]})
+    await _db.sites.update_one(
+        {"_id": site["_id"]},
+        {"$set": {
+            "initialized": True,
+            "last_error": "",
+            "last_checked": datetime.now(timezone.utc),
+        }},
+    )
+    await sendMessage(
+        message,
+        f"Reset <b>{escape(site.get('name', site['url']))}</b>.\n"
+        f"Forgot {result.deleted_count} known item(s). "
+        "Next /checksites can queue currently found links.",
+    )
+
+
+def _format_site_details(details):
+    if not details:
+        return ""
+    lines = ["", "", "<b>Sites</b>"]
+    for item in details[:8]:
+        line = (
+            f"• {escape(item['name'])}: found {item['found']}, "
+            f"new {item['new']}, baseline {item['baseline']}, known {item['known']}"
+        )
+        if item["status"] != "ok":
+            line += f" [{escape(item['status'])}: {escape(item['error'])}]"
+        lines.append(line)
+    if len(details) > 8:
+        lines.append(f"…and {len(details) - 8} more")
+    return "\n".join(lines)[:1800]
+
+
+@new_task
 async def check_sites(_, message):
     status = await sendMessage(message, "Checking monitored sites now…")
     try:
@@ -706,12 +800,105 @@ async def check_sites(_, message):
             monitor_line = "\nAuto monitor: OFF"
         await status.edit_text(
             f"<b>Check complete</b>\nSites: {stats['sites']}\n"
+            f"Found links: {stats['found']}\n"
             f"New tasks: {stats['new']}\n"
+            f"Baselined: {stats['baseline']}\n"
+            f"Known/skipped: {stats['known']}\n"
             f"Blocked: {stats['blocked']}\nErrors: {stats['errors']}"
             f"{monitor_line}"
+            f"{_format_site_details(stats['details'])}"
         )
     except Exception as error:
         await status.edit_text(f"Check failed: <code>{escape(str(error))}</code>")
+
+
+async def _diagnose_monitor():
+    if _db is None:
+        return "DATABASE_URL is required."
+    monitor_job = auto_scheduler.get_job("auto_site_monitor")
+    if AUTO_ENABLED and monitor_job:
+        next_run = monitor_job.next_run_time
+        next_run = next_run.strftime("%Y-%m-%d %H:%M:%S %Z") if next_run else "pending"
+        scheduler_line = f"ON, next run {next_run}"
+    else:
+        scheduler_line = "OFF"
+    sites = await _db.sites.find({}).sort("created_at", 1).to_list(length=20)
+    queued = await _db.items.count_documents({"status": "queued"})
+    baseline = await _db.items.count_documents({"status": "baseline"})
+    lines = [
+        "<b>Auto monitor test</b>",
+        f"Enabled env: <code>{AUTO_ENABLED}</code>",
+        f"Scheduler: <code>{escape(scheduler_line)}</code>",
+        f"Auto chat: <code>{escape(str(AUTO_CHAT))}</code>",
+        f"Sites in DB: <code>{len(sites)}</code>",
+        f"Queued items in DB: <code>{queued}</code>",
+        f"Baseline items in DB: <code>{baseline}</code>",
+    ]
+    for site in sites[:8]:
+        lines.append(
+            f"• {escape(site.get('name', 'Site'))} "
+            f"[{escape(site.get('type', 'auto'))}] "
+            f"<code>{escape(site['url'])}</code>"
+        )
+        if site.get("last_error"):
+            lines.append(f"  Last error: <code>{escape(site['last_error'][:180])}</code>")
+    return "\n".join(lines)
+
+
+@new_task
+async def test_monitor(_, message):
+    parts = message.text.split(maxsplit=2)
+    if len(parts) >= 3 and parts[1].lower() == "leech":
+        item = {
+            "title": "Auto monitor manual leech test",
+            "url": parts[2].strip(),
+            "page_url": "manual-test",
+        }
+        try:
+            await _dispatch(item)
+            return await sendMessage(
+                message,
+                "Test leech dispatched. Check the auto monitor chat/status.",
+            )
+        except Exception as error:
+            return await sendMessage(message, f"Test leech failed: <code>{escape(str(error))}</code>")
+    await sendMessage(message, await _diagnose_monitor())
+
+
+@new_task
+async def test_site(_, message):
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        return await sendMessage(message, "Usage: /testsite URL [auto|rss|html|mv]")
+    url = _canonical_url(parts[1])
+    kind = parts[2].strip().lower() if len(parts) > 2 else "auto"
+    if kind not in SITE_TYPES:
+        return await sendMessage(message, "Type must be auto, rss, html, or mv.")
+    waiting = await sendMessage(
+        message,
+        f"Testing <code>{escape(url)}</code> as <code>{kind}</code>…",
+    )
+    try:
+        items = await _scrape({"url": url, "type": kind})
+        lines = [
+            "<b>Test site complete</b>",
+            f"URL: <code>{escape(url)}</code>",
+            f"Type: <code>{kind}</code>",
+            f"Found links: <code>{len(items)}</code>",
+        ]
+        for item in items[:5]:
+            lines.append(
+                f"\n<b>{escape(item['title'][:120])}</b>\n"
+                f"<code>{escape(item['url'][:700])}</code>"
+            )
+        if len(items) > 5:
+            lines.append(f"\n…and {len(items) - 5} more")
+        await waiting.edit_text("\n".join(lines), disable_web_page_preview=True)
+    except Exception as error:
+        await waiting.edit_text(
+            f"Test site failed: <code>{escape(str(error))}</code>",
+            disable_web_page_preview=True,
+        )
 
 
 @new_task
@@ -819,6 +1006,9 @@ if AUTO_ENABLED and DATABASE_URL:
 bot.add_handler(MessageHandler(auto_sites, filters=command("autosites") & CustomFilters.sudo))
 bot.add_handler(MessageHandler(add_site, filters=command("addsite") & CustomFilters.sudo))
 bot.add_handler(MessageHandler(delete_site, filters=command("delsite") & CustomFilters.sudo))
+bot.add_handler(MessageHandler(reset_site, filters=command("resetsite") & CustomFilters.sudo))
 bot.add_handler(MessageHandler(check_sites, filters=command("checksites") & CustomFilters.sudo))
+bot.add_handler(MessageHandler(test_monitor, filters=command("testmonitor") & CustomFilters.sudo))
+bot.add_handler(MessageHandler(test_site, filters=command("testsite") & CustomFilters.sudo))
 bot.add_handler(MessageHandler(mv_view, filters=command("mv") & CustomFilters.authorized))
 bot.add_handler(CallbackQueryHandler(mv_callback, filters=regex(r"^mv(show|link|leech):")))

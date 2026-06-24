@@ -776,7 +776,10 @@ async def set_commands(client):
             BotCommand('autosites', 'List monitored websites (Sudo only)'),
             BotCommand('addsite', 'Add a monitored website (Sudo only)'),
             BotCommand('delsite', 'Remove a monitored website (Sudo only)'),
+            BotCommand('resetsite', 'Forget known links for a monitored site'),
             BotCommand('checksites', 'Check monitored websites now (Sudo only)'),
+            BotCommand('testmonitor', 'Diagnose auto monitor or test leech dispatch'),
+            BotCommand('testsite', 'Test scrape a website without leeching'),
         ]
         if config_dict['SHOW_EXTRA_CMDS']:
             bot_cmds.insert(1, BotCommand(BotCommands.MirrorCommand[2], f'or /{BotCommands.MirrorCommand[3]} Mirror and UnZip [links/media/rclone_path]'))
