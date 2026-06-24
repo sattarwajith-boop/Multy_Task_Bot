@@ -64,11 +64,14 @@ then redeploy without a custom Run command. The Dockerfile should run
 - `/autosites`
 - `/delsite URL`
 - `/checksites`
-- `/mv` (uses `MV_SITE_URL`)
+- `/mv` (uses `MV_SITE_URL`, but does not auto-monitor it)
 - `/mv URL` (one-time MV-compatible site browse)
 
 The management commands require sudo access. `/mv` requires normal bot
 authorization.
+
+`MV_SITE_URL` is only a default browse URL for `/mv`.  Sites are monitored only
+after you add them with `/addsite`, and `/delsite` removes them permanently.
 
 ## Auto-forwarding
 

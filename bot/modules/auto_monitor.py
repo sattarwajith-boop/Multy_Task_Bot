@@ -498,20 +498,6 @@ async def _ensure_indexes():
             )
     await _db.sites.create_index("url", unique=True)
     await _db.items.create_index("key", unique=True)
-    if MV_SITE_URL:
-        canonical_mv = _canonical_url(MV_SITE_URL)
-        await _db.sites.update_one(
-            {"url": canonical_mv},
-            {"$setOnInsert": {
-                "url": canonical_mv,
-                "name": "MV",
-                "type": "mv",
-                "enabled": True,
-                "initialized": False,
-                "created_at": datetime.now(timezone.utc),
-            }},
-            upsert=True,
-        )
 
 
 async def _run_check(force=False):
