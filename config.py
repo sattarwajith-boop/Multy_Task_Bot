@@ -9,19 +9,19 @@ them in Koyeb Secrets. For a private/local deployment, you may edit them here.
 All values are strings because WZML-X reads its configuration from os.environ.
 """
 
-BOT_TOKEN = ""
-OWNER_ID = ""
-TELEGRAM_API = ""
-TELEGRAM_HASH = ""
-DATABASE_URL = ""
+BOT_TOKEN = ""          # Example: 1234567890:AA...
+OWNER_ID = ""           # Your Telegram numeric user id
+TELEGRAM_API = ""       # From https://my.telegram.org
+TELEGRAM_HASH = ""      # From https://my.telegram.org
+DATABASE_URL = ""       # MongoDB connection string
 
-LEECH_LOG_ID = ""
-AUTHORIZED_CHATS = ""
-SUDO_USERS = ""
+LEECH_LOG_ID = ""       # Upload/log group or channel id, usually -100...
+AUTHORIZED_CHATS = ""   # Chat ids allowed to use the bot
+SUDO_USERS = ""         # Sudo user ids
 
-BASE_URL = ""
-BASE_URL_PORT = "8000"
-PORT = "8000"
+BASE_URL = ""           # Example: https://your-service-name.koyeb.app
+BASE_URL_PORT = "8080"
+PORT = "8080"
 ENABLE_WEB_SERVER = "true"
 
 DOWNLOAD_DIR = "/usr/src/app/downloads/"
@@ -29,16 +29,16 @@ DEFAULT_UPLOAD = "gd"
 
 AUTO_MONITOR_ENABLED = "true"
 AUTO_MONITOR_INTERVAL = "900"
-AUTO_MONITOR_CHAT = ""
+AUTO_MONITOR_CHAT = ""  # Group/channel id where auto monitor posts/leech starts
 AUTO_MAX_ITEMS_PER_SITE = "10"
 AUTO_LEECH_EXISTING = "false"
 AUTO_FETCH_RETRIES = "3"
 AUTO_FETCH_TIMEOUT = "35"
 AUTO_SITE_COOKIE = ""
 AUTO_SITE_PROXY = ""
-AUTO_FORWARD_CHATS = ""
-MV_SITE_URL = ""
-OMDB_API_KEY = ""
+AUTO_FORWARD_CHATS = "" # Optional extra destination chats, space/comma separated
+MV_SITE_URL = ""        # Example: https://www.example-site.com
+OMDB_API_KEY = ""       # API key only, or full omdbapi.com URL
 
 BOT_MAX_TASKS = "2"
 QUEUE_ALL = "2"

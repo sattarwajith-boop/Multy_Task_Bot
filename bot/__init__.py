@@ -5,6 +5,7 @@ from datetime import datetime
 from inspect import signature
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client as tgClient, enums, utils as pyroutils
+from pyrogram.errors import FloodWait
 from pymongo import MongoClient
 from asyncio import Lock, new_event_loop, set_event_loop
 from dotenv import load_dotenv, dotenv_values
@@ -866,8 +867,19 @@ else:
 
 log_info("Creating client from BOT_TOKEN")
 telegram_workers = max(1, int(environ.get('TELEGRAM_WORKERS', '8')))
-bot = wztgClient('bot', TELEGRAM_API, TELEGRAM_HASH, bot_token=BOT_TOKEN, workers=telegram_workers,
-               parse_mode=enums.ParseMode.HTML).start()
+bot_client = wztgClient('bot', TELEGRAM_API, TELEGRAM_HASH, bot_token=BOT_TOKEN, workers=telegram_workers,
+               parse_mode=enums.ParseMode.HTML)
+while True:
+    try:
+        bot = bot_client.start()
+        break
+    except FloodWait as e:
+        wait_time = int(getattr(e, 'value', 60)) + 5
+        log_warning(
+            f"Telegram FloodWait during bot login. Sleeping {wait_time}s "
+            "instead of crashing/restarting."
+        )
+        sleep(wait_time)
 bot_loop = bot.loop
 bot_name = bot.me.username
 scheduler = AsyncIOScheduler(timezone=str(get_localzone()), event_loop=bot_loop)
