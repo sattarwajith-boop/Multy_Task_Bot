@@ -127,6 +127,7 @@ _db = _mongo.wzmlx_auto if _mongo is not None else None
 _check_lock = asyncio.Lock()
 _mv_cache = {}
 auto_scheduler = AsyncIOScheduler(timezone=str(get_localzone()), event_loop=bot_loop)
+TG_SAFE_TEXT_LIMIT = 3800
 
 
 class SiteBlockedError(RuntimeError):
@@ -782,6 +783,16 @@ def _format_site_details(details):
     return "\n".join(lines)[:1800]
 
 
+def _short_text(value, limit=300):
+    value = str(value or "")
+    return value if len(value) <= limit else f"{value[:limit - 1]}…"
+
+
+async def _safe_edit(message, text, **kwargs):
+    text = text if len(text) <= TG_SAFE_TEXT_LIMIT else f"{text[:TG_SAFE_TEXT_LIMIT - 40]}\n\n…truncated"
+    return await message.edit_text(text, **kwargs)
+
+
 @new_task
 async def check_sites(_, message):
     status = await sendMessage(message, "Checking monitored sites now…")
@@ -886,17 +897,18 @@ async def test_site(_, message):
             f"Type: <code>{kind}</code>",
             f"Found links: <code>{len(items)}</code>",
         ]
-        for item in items[:5]:
+        for index, item in enumerate(items[:3], 1):
             lines.append(
-                f"\n<b>{escape(item['title'][:120])}</b>\n"
-                f"<code>{escape(item['url'][:700])}</code>"
+                f"\n<b>{index}. {escape(_short_text(item['title'], 90))}</b>\n"
+                f"<code>{escape(_short_text(item['url'], 320))}</code>"
             )
-        if len(items) > 5:
-            lines.append(f"\n…and {len(items) - 5} more")
-        await waiting.edit_text("\n".join(lines), disable_web_page_preview=True)
+        if len(items) > 3:
+            lines.append(f"\n…and {len(items) - 3} more. Use /mv for buttons or /checksites to queue.")
+        await _safe_edit(waiting, "\n".join(lines), disable_web_page_preview=True)
     except Exception as error:
-        await waiting.edit_text(
-            f"Test site failed: <code>{escape(str(error))}</code>",
+        await _safe_edit(
+            waiting,
+            f"Test site failed: <code>{escape(_short_text(error, 900))}</code>",
             disable_web_page_preview=True,
         )
 
