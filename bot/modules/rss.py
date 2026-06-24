@@ -560,8 +560,9 @@ Timeout: 60 sec. Argument -c for command and options
 
 async def rssMonitor():
     if not config_dict['RSS_CHAT']:
-        LOGGER.warning('RSS_CHAT not added! Shutting down rss scheduler...')
-        scheduler.shutdown(wait=False)
+        LOGGER.warning('RSS_CHAT not added! RSS monitor disabled.')
+        if scheduler.running:
+            scheduler.pause()
         return
     if len(rss_dict) == 0:
         scheduler.pause()
@@ -651,8 +652,11 @@ def addJob(delay):
     scheduler.add_job(rssMonitor, trigger=IntervalTrigger(seconds=delay), id='0', name='RSS', misfire_grace_time=15,
                       max_instances=1, next_run_time=datetime.now()+timedelta(seconds=20), replace_existing=True)
 
-addJob(config_dict['RSS_DELAY'])
-scheduler.start()
+if config_dict['RSS_CHAT']:
+    addJob(config_dict['RSS_DELAY'])
+    scheduler.start()
+else:
+    LOGGER.warning('RSS_CHAT not added! RSS monitor disabled.')
 bot.add_handler(MessageHandler(getRssMenu, filters=command(
     BotCommands.RssCommand) & CustomFilters.authorized & ~CustomFilters.blacklisted))
 bot.add_handler(CallbackQueryHandler(rssListener, filters=regex(r"^rss")))

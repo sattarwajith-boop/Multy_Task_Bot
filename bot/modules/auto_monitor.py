@@ -26,6 +26,7 @@ from aiohttp import (
 )
 from bs4 import BeautifulSoup
 from motor.motor_asyncio import AsyncIOMotorClient
+from pyrogram.errors import FloodWait
 from pyrogram.filters import command, regex
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -91,7 +92,9 @@ AUTO_CHAT = (
     if _auto_chat_value.lstrip("-").isdigit()
     else _auto_chat_value
 )
-AUTO_MAX_ITEMS = max(1, int(os.getenv("AUTO_MAX_ITEMS_PER_SITE", "10")))
+AUTO_MAX_ITEMS = max(1, int(os.getenv("AUTO_MAX_ITEMS_PER_SITE", "3")))
+AUTO_MAX_TASKS_PER_RUN = max(1, int(os.getenv("AUTO_MAX_TASKS_PER_RUN", "2")))
+AUTO_DISPATCH_DELAY = max(0, int(os.getenv("AUTO_DISPATCH_DELAY", "8")))
 AUTO_LEECH_EXISTING = os.getenv("AUTO_LEECH_EXISTING", "false").lower() in {
     "1",
     "true",
@@ -430,6 +433,23 @@ async def _send_imdb(item):
         LOGGER.warning("IMDb card send failed: %s", error)
 
 
+async def _send_auto_message(text):
+    while True:
+        try:
+            return await bot.send_message(
+                AUTO_CHAT,
+                text,
+                disable_web_page_preview=True,
+            )
+        except FloodWait as error:
+            wait_time = int(getattr(error, "value", 30)) + 2
+            LOGGER.warning(
+                "Telegram FloodWait while dispatching auto task. Sleeping %ss.",
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+
 async def _prepare_forward_dumps():
     if not AUTO_FORWARD_CHATS:
         return False
@@ -447,7 +467,7 @@ async def _dispatch(item):
     cmd = "qbleech" if is_torrent else "leech"
     dump_arg = " -ud all" if use_dumps else ""
     text = f"/{cmd} {item['url']}{dump_arg}\nTag: Auto {OWNER_ID}"
-    message = await bot.send_message(AUTO_CHAT, text, disable_web_page_preview=True)
+    message = await _send_auto_message(text)
     # Telegram does not feed a bot's own messages back through command handlers.
     # Fetch the just-sent command and call WZML-X's queue entrypoint directly so
     # auto-monitor creates the same task that a manual /qbleech paste would.
@@ -457,6 +477,8 @@ async def _dispatch(item):
         await qb_leech(bot, message)
     else:
         await leech(bot, message)
+    if AUTO_DISPATCH_DELAY:
+        await asyncio.sleep(AUTO_DISPATCH_DELAY)
 
 
 async def _ensure_indexes():
@@ -504,7 +526,17 @@ async def _run_check(force=False):
     if _db is None:
         raise RuntimeError("DATABASE_URL is required for auto monitoring")
     if _check_lock.locked() and not force:
-        return {"sites": 0, "new": 0, "blocked": 0, "errors": 0}
+        return {
+            "sites": 0,
+            "found": 0,
+            "new": 0,
+            "baseline": 0,
+            "known": 0,
+            "deferred": 0,
+            "blocked": 0,
+            "errors": 0,
+            "details": [],
+        }
     async with _check_lock:
         await _ensure_indexes()
         sites = await _db.sites.find({"enabled": True}).to_list(length=None)
@@ -514,6 +546,7 @@ async def _run_check(force=False):
             "new": 0,
             "baseline": 0,
             "known": 0,
+            "deferred": 0,
             "blocked": 0,
             "errors": 0,
             "details": [],
@@ -527,6 +560,7 @@ async def _run_check(force=False):
                 "new": 0,
                 "baseline": 0,
                 "known": 0,
+                "deferred": 0,
                 "status": "ok",
                 "error": "",
             }
@@ -570,6 +604,10 @@ async def _run_check(force=False):
                     continue
                 # Oldest first keeps multi-item releases in a sensible order.
                 for item in reversed(items[:AUTO_MAX_ITEMS]):
+                    if stats["new"] >= AUTO_MAX_TASKS_PER_RUN:
+                        site_detail["deferred"] += 1
+                        stats["deferred"] += 1
+                        continue
                     key = _key(item["url"])
                     claim = await _db.items.update_one(
                         {"key": key},
@@ -759,7 +797,8 @@ def _format_site_details(details):
     for item in details[:8]:
         line = (
             f"• {escape(item['name'])}: found {item['found']}, "
-            f"new {item['new']}, baseline {item['baseline']}, known {item['known']}"
+            f"new {item['new']}, baseline {item['baseline']}, "
+            f"known {item['known']}, deferred {item['deferred']}"
         )
         if item["status"] != "ok":
             line += f" [{escape(item['status'])}: {escape(item['error'])}]"
@@ -801,6 +840,7 @@ async def check_sites(_, message):
             f"New tasks: {stats['new']}\n"
             f"Baselined: {stats['baseline']}\n"
             f"Known/skipped: {stats['known']}\n"
+            f"Deferred: {stats['deferred']}\n"
             f"Blocked: {stats['blocked']}\nErrors: {stats['errors']}"
             f"{monitor_line}"
             f"{_format_site_details(stats['details'])}"
@@ -998,7 +1038,7 @@ if AUTO_ENABLED and DATABASE_URL:
         "Auto monitor enabled: interval=%ss chat=%s max_items=%s",
         AUTO_INTERVAL,
         AUTO_CHAT,
-        AUTO_MAX_ITEMS,
+        f"{AUTO_MAX_ITEMS}, max_tasks_per_run={AUTO_MAX_TASKS_PER_RUN}",
     )
 
 bot.add_handler(MessageHandler(auto_sites, filters=command("autosites") & CustomFilters.sudo))
