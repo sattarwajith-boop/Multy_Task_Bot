@@ -440,11 +440,15 @@ async def _dispatch(item):
     dump_arg = " -ud all" if use_dumps else ""
     text = f"/{cmd} {item['url']}{dump_arg}\nTag: Auto {OWNER_ID}"
     message = await bot.send_message(AUTO_CHAT, text, disable_web_page_preview=True)
+    # Telegram does not feed a bot's own messages back through command handlers.
+    # Fetch the just-sent command and call WZML-X's queue entrypoint directly so
+    # auto-monitor creates the same task that a manual /qbleech paste would.
+    message = await bot.get_messages(chat_id=message.chat.id, message_ids=message.id)
     message.from_user = await bot.get_users(OWNER_ID)
     if is_torrent:
-        qb_leech(bot, message)
+        await qb_leech(bot, message)
     else:
-        leech(bot, message)
+        await leech(bot, message)
 
 
 async def _ensure_indexes():
@@ -683,10 +687,22 @@ async def check_sites(_, message):
     status = await sendMessage(message, "Checking monitored sites now…")
     try:
         stats = await _run_check(force=True)
+        monitor_job = scheduler.get_job("auto_site_monitor")
+        if AUTO_ENABLED and monitor_job:
+            next_run = monitor_job.next_run_time
+            next_run = (
+                next_run.strftime("%Y-%m-%d %H:%M:%S %Z")
+                if next_run
+                else "pending"
+            )
+            monitor_line = f"\nAuto monitor: ON\nNext run: {next_run}"
+        else:
+            monitor_line = "\nAuto monitor: OFF"
         await status.edit_text(
             f"<b>Check complete</b>\nSites: {stats['sites']}\n"
             f"New tasks: {stats['new']}\n"
             f"Blocked: {stats['blocked']}\nErrors: {stats['errors']}"
+            f"{monitor_line}"
         )
     except Exception as error:
         await status.edit_text(f"Check failed: <code>{escape(str(error))}</code>")
@@ -784,6 +800,14 @@ if AUTO_ENABLED and DATABASE_URL:
         coalesce=True,
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
+    )
+    if not scheduler.running:
+        scheduler.start()
+    LOGGER.info(
+        "Auto monitor enabled: interval=%ss chat=%s max_items=%s",
+        AUTO_INTERVAL,
+        AUTO_CHAT,
+        AUTO_MAX_ITEMS,
     )
 
 bot.add_handler(MessageHandler(auto_sites, filters=command("autosites") & CustomFilters.sudo))
