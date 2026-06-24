@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 import cloudscraper
 import feedparser
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import (
     ClientConnectionError,
     ClientResponseError,
@@ -28,14 +29,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram.filters import command, regex
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from tzlocal import get_localzone
 
 from bot import (
     DATABASE_URL,
     LOGGER,
     OWNER_ID,
     bot,
+    bot_loop,
     config_dict,
-    scheduler,
     user_data,
 )
 from bot.helper.ext_utils.bot_utils import new_task
@@ -123,6 +125,7 @@ _mongo = (
 _db = _mongo.wzmlx_auto if _mongo is not None else None
 _check_lock = asyncio.Lock()
 _mv_cache = {}
+auto_scheduler = AsyncIOScheduler(timezone=str(get_localzone()), event_loop=bot_loop)
 
 
 class SiteBlockedError(RuntimeError):
@@ -141,7 +144,10 @@ def _clean_title(value):
 
 
 def _canonical_url(url):
-    parsed = urlparse(url.strip())
+    url = url.strip()
+    if url and "://" not in url and re.match(r"^[\w.-]+\.[a-z]{2,}(?:[/:?#]|$)", url, re.I):
+        url = f"https://{url}"
+    parsed = urlparse(url)
     scheme = parsed.scheme.lower() or "https"
     host = (parsed.hostname or "").lower()
     if not host:
@@ -687,7 +693,7 @@ async def check_sites(_, message):
     status = await sendMessage(message, "Checking monitored sites now…")
     try:
         stats = await _run_check(force=True)
-        monitor_job = scheduler.get_job("auto_site_monitor")
+        monitor_job = auto_scheduler.get_job("auto_site_monitor")
         if AUTO_ENABLED and monitor_job:
             next_run = monitor_job.next_run_time
             next_run = (
@@ -791,7 +797,7 @@ async def scheduled_check():
 
 
 if AUTO_ENABLED and DATABASE_URL:
-    scheduler.add_job(
+    auto_scheduler.add_job(
         scheduled_check,
         "interval",
         seconds=AUTO_INTERVAL,
@@ -801,8 +807,8 @@ if AUTO_ENABLED and DATABASE_URL:
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
     )
-    if not scheduler.running:
-        scheduler.start()
+    if not auto_scheduler.running:
+        auto_scheduler.start()
     LOGGER.info(
         "Auto monitor enabled: interval=%ss chat=%s max_items=%s",
         AUTO_INTERVAL,
