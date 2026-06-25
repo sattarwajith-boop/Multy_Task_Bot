@@ -73,6 +73,16 @@ authorization.
 `MV_SITE_URL` is only a default browse URL for `/mv`.  Sites are monitored only
 after you add them with `/addsite`, and `/delsite` removes them permanently.
 
+## Scraper-only mode
+
+Set `SCRAPER_ONLY=true` when this bot should only watch sites and forward
+`/qbleech magnet...` commands to `AUTO_MONITOR_CHAT` for a separate WZML-X bot.
+In this mode qBittorrent, aria2, and local WZML-X leech handlers are not started.
+
+For the separate WZML-X bot to react, add both bots to the same supergroup,
+make the WZML-X bot admin, and turn off its BotFather group privacy if needed.
+Set `SCRAPER_ONLY=false` to return to the all-in-one bot.
+
 ## Auto-forwarding
 
 Put comma- or space-separated IDs/usernames in `AUTO_FORWARD_CHATS`, for

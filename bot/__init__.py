@@ -105,6 +105,13 @@ if _is_unset(DATABASE_URL):
     DATABASE_URL = ''
     log_warning("DATABASE_URL not provided; MongoDB and auto-monitor persistence are disabled")
 
+SCRAPER_ONLY = environ.get('SCRAPER_ONLY', 'false').lower() in {
+    '1',
+    'true',
+    'yes',
+    'on',
+}
+
 if DATABASE_URL:
     conn = MongoClient(
         DATABASE_URL,
@@ -674,6 +681,7 @@ config_dict = {'ANIME_TEMPLATE': ANIME_TEMPLATE,
                'AUTHOR_URL': AUTHOR_URL,
                'COVER_IMAGE': COVER_IMAGE,
                'TITLE_NAME': TITLE_NAME,
+               'SCRAPER_ONLY': SCRAPER_ONLY,
                'TIMEZONE': TIMEZONE,
                'GD_INFO': GD_INFO,
                'GDTOT_CRYPT': GDTOT_CRYPT,
@@ -792,13 +800,11 @@ if ENABLE_WEB_SERVER:
         "-",
     ])
 
-srun(["qbittorrent-nox", "-d", f"--profile={getcwd()}"])
 if not ospath.exists('.netrc'):
     with open('.netrc', 'w'):
         pass
 srun(["chmod", "600", ".netrc"])
 srun(["cp", ".netrc", "/root/.netrc"])
-srun(["bash", "aria.sh"])
 if ospath.exists('accounts.zip'):
     if ospath.exists('accounts'):
         srun(["rm", "-rf", "accounts"])
@@ -809,10 +815,13 @@ if not ospath.exists('accounts'):
     config_dict['USE_SERVICE_ACCOUNTS'] = False
 sleep(0.5)
 
-aria2 = ariaAPI(ariaClient(host="http://localhost", port=6800, secret=""))
+aria2 = None
+qb_client = None
 
 
 def get_client():
+    if SCRAPER_ONLY:
+        raise RuntimeError("qBittorrent is disabled because SCRAPER_ONLY=true")
     return qbClient(host="localhost", port=8090, VERIFY_WEBUI_CERTIFICATE=False, REQUESTS_ARGS={'timeout': (30, 60)})
 
 
@@ -828,42 +837,47 @@ def aria2c_init():
             sleep(0.5)
 
 
-aria2c_init()
-
-aria2c_global = ['bt-max-open-files', 'download-result', 'keep-unfinished-download-result', 'log', 'log-level',
-                 'max-concurrent-downloads', 'max-download-result', 'max-overall-download-limit', 'save-session',
-                 'max-overall-upload-limit', 'optimize-concurrent-downloads', 'save-cookies', 'server-stat-of']
-
-if not aria2_options:
-    aria2_options = aria2.client.get_global_option()
+if SCRAPER_ONLY:
+    log_info("SCRAPER_ONLY=true: skipping qBittorrent, aria2, and local leech engine startup")
 else:
-    a2c_glo = {op: aria2_options[op]
-               for op in aria2c_global if op in aria2_options}
-    aria2.set_global_options(a2c_glo)
+    srun(["qbittorrent-nox", "-d", f"--profile={getcwd()}"])
+    srun(["bash", "aria.sh"])
+    aria2 = ariaAPI(ariaClient(host="http://localhost", port=6800, secret=""))
+    aria2c_init()
 
-qb_client = None
-for attempt in range(20):
-    try:
-        qb_client = get_client()
-        qb_client.auth_log_in()
-        qb_client.app.version
-        break
-    except Exception as error:
-        if attempt == 19:
-            raise RuntimeError(f"qBittorrent failed to start: {error}") from error
-        sleep(0.5)
-if not qbit_options:
-    qbit_options = dict(qb_client.app_preferences())
-    del qbit_options['listen_port']
-    for k in list(qbit_options.keys()):
-        if k.startswith('rss'):
-            del qbit_options[k]
-else:
-    qb_opt = {**qbit_options}
-    for k, v in list(qb_opt.items()):
-        if v in ["", "*"]:
-            del qb_opt[k]
-    qb_client.app_set_preferences(qb_opt)
+    aria2c_global = ['bt-max-open-files', 'download-result', 'keep-unfinished-download-result', 'log', 'log-level',
+                     'max-concurrent-downloads', 'max-download-result', 'max-overall-download-limit', 'save-session',
+                     'max-overall-upload-limit', 'optimize-concurrent-downloads', 'save-cookies', 'server-stat-of']
+
+    if not aria2_options:
+        aria2_options = aria2.client.get_global_option()
+    else:
+        a2c_glo = {op: aria2_options[op]
+                   for op in aria2c_global if op in aria2_options}
+        aria2.set_global_options(a2c_glo)
+
+    for attempt in range(20):
+        try:
+            qb_client = get_client()
+            qb_client.auth_log_in()
+            qb_client.app.version
+            break
+        except Exception as error:
+            if attempt == 19:
+                raise RuntimeError(f"qBittorrent failed to start: {error}") from error
+            sleep(0.5)
+    if not qbit_options:
+        qbit_options = dict(qb_client.app_preferences())
+        del qbit_options['listen_port']
+        for k in list(qbit_options.keys()):
+            if k.startswith('rss'):
+                del qbit_options[k]
+    else:
+        qb_opt = {**qbit_options}
+        for k, v in list(qb_opt.items()):
+            if v in ["", "*"]:
+                del qb_opt[k]
+        qb_client.app_set_preferences(qb_opt)
 
 log_info("Creating client from BOT_TOKEN")
 telegram_workers = max(1, int(environ.get('TELEGRAM_WORKERS', '8')))

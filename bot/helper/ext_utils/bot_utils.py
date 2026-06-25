@@ -677,6 +677,24 @@ async def set_commands(client):
     if not config_dict['SET_COMMANDS']:
         return
     try:
+        if config_dict.get('SCRAPER_ONLY'):
+            bot_cmds = [
+                BotCommand(BotCommands.StartCommand, 'Start the scraper bot'),
+                BotCommand('mv', 'Browse configured MV-style torrent releases'),
+                BotCommand('autosites', 'List monitored websites (Sudo only)'),
+                BotCommand('addsite', 'Add a monitored website (Sudo only)'),
+                BotCommand('delsite', 'Remove a monitored website (Sudo only)'),
+                BotCommand('resetsite', 'Forget known links for a monitored site'),
+                BotCommand('checksites', 'Check monitored websites now (Sudo only)'),
+                BotCommand('testmonitor', 'Diagnose auto monitor or test dispatch'),
+                BotCommand('testsite', 'Test scrape a website without leeching'),
+                BotCommand(BotCommands.HelpCommand, 'Get bot help'),
+                BotCommand(BotCommands.PingCommand[0], 'Ping the bot'),
+                BotCommand(BotCommands.RestartCommand[0], 'Restart the bot'),
+            ]
+            await client.set_bot_commands(bot_cmds)
+            LOGGER.info("Scraper-only Bot Commands have been Set & Updated")
+            return
         bot_cmds = [
             BotCommand(
                 BotCommands.MirrorCommand[0],

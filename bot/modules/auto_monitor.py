@@ -36,6 +36,7 @@ from bot import (
     DATABASE_URL,
     LOGGER,
     OWNER_ID,
+    SCRAPER_ONLY,
     bot,
     bot_loop,
     config_dict,
@@ -44,7 +45,10 @@ from bot import (
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.message_utils import sendMessage
-from bot.modules.mirror_leech import leech, qb_leech
+if not SCRAPER_ONLY:
+    from bot.modules.mirror_leech import leech, qb_leech
+else:
+    leech = qb_leech = None
 
 
 USER_AGENTS = [
@@ -462,12 +466,17 @@ async def _prepare_forward_dumps():
 
 async def _dispatch(item):
     await _send_imdb(item)
-    use_dumps = await _prepare_forward_dumps()
+    use_dumps = False if SCRAPER_ONLY else await _prepare_forward_dumps()
     is_torrent = item["url"].startswith("magnet:") or ".torrent" in item["url"].lower()
     cmd = "qbleech" if is_torrent else "leech"
     dump_arg = " -ud all" if use_dumps else ""
     text = f"/{cmd} {item['url']}{dump_arg}\nTag: Auto {OWNER_ID}"
     message = await _send_auto_message(text)
+    if SCRAPER_ONLY:
+        LOGGER.info("SCRAPER_ONLY dispatched %s command to %s", cmd, AUTO_CHAT)
+        if AUTO_DISPATCH_DELAY:
+            await asyncio.sleep(AUTO_DISPATCH_DELAY)
+        return
     # Telegram does not feed a bot's own messages back through command handlers.
     # Fetch the just-sent command and call WZML-X's queue entrypoint directly so
     # auto-monitor creates the same task that a manual /qbleech paste would.

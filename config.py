@@ -23,6 +23,7 @@ BASE_URL = ""           # Example: https://your-service-name.koyeb.app
 BASE_URL_PORT = "8080"
 PORT = "8080"
 ENABLE_WEB_SERVER = "true"
+SCRAPER_ONLY = "false"
 
 DOWNLOAD_DIR = "/usr/src/app/downloads/"
 DEFAULT_UPLOAD = "gd"

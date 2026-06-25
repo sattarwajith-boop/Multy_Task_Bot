@@ -19,7 +19,7 @@ from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 from pyrogram.filters import command, private, regex
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot import bot, user, bot_name, config_dict, user_data, botStartTime, LOGGER, Interval, DATABASE_URL, QbInterval, INCOMPLETE_TASK_NOTIFIER, scheduler
+from bot import bot, user, bot_name, config_dict, user_data, botStartTime, LOGGER, Interval, DATABASE_URL, QbInterval, INCOMPLETE_TASK_NOTIFIER, scheduler, SCRAPER_ONLY
 from bot.version import get_version
 from .helper.ext_utils.fs_utils import start_cleanup, clean_all, exit_clean_up
 from .helper.ext_utils.bot_utils import get_readable_time, cmd_exec, sync_to_async, new_task, set_commands, update_user_ldata, get_stats
@@ -28,11 +28,14 @@ from .helper.telegram_helper.bot_commands import BotCommands
 from .helper.telegram_helper.message_utils import sendMessage, editMessage, editReplyMarkup, sendFile, deleteMessage, delete_all_messages
 from .helper.telegram_helper.filters import CustomFilters
 from .helper.telegram_helper.button_build import ButtonMaker
-from .helper.listeners.aria2_listener import start_aria2_listener
 from .helper.themes import BotTheme
-from .modules import authorize, clone, gd_count, gd_delete, gd_list, cancel_mirror, mirror_leech, status, torrent_search, torrent_select, ytdlp, \
-                     rss, shell, eval, users_settings, bot_settings, speedtest, save_msg, images, imdb, anilist, mediainfo, mydramalist, gen_pyro_sess, \
-                     gd_clean, broadcast, category_select, auto_monitor
+if SCRAPER_ONLY:
+    from .modules import authorize, shell, eval, auto_monitor
+else:
+    from .helper.listeners.aria2_listener import start_aria2_listener
+    from .modules import authorize, clone, gd_count, gd_delete, gd_list, cancel_mirror, mirror_leech, status, torrent_search, torrent_select, ytdlp, \
+                         rss, shell, eval, users_settings, bot_settings, speedtest, save_msg, images, imdb, anilist, mediainfo, mydramalist, gen_pyro_sess, \
+                         gd_clean, broadcast, category_select, auto_monitor
 
 async def stats(client, message):
     msg, btns = await get_stats(message)
@@ -243,8 +246,12 @@ async def log_check():
     
 
 async def main():
-    await gather(start_cleanup(), torrent_search.initiate_search_tools(), restart_notification(), search_images(), set_commands(bot), log_check())
-    await sync_to_async(start_aria2_listener, wait=False)
+    startup_jobs = [start_cleanup(), restart_notification(), search_images(), set_commands(bot), log_check()]
+    if not SCRAPER_ONLY:
+        startup_jobs.append(torrent_search.initiate_search_tools())
+    await gather(*startup_jobs)
+    if not SCRAPER_ONLY:
+        await sync_to_async(start_aria2_listener, wait=False)
     
     bot.add_handler(MessageHandler(
         start, filters=command(BotCommands.StartCommand) & private))
@@ -262,7 +269,8 @@ async def main():
         BotCommands.HelpCommand) & CustomFilters.authorized & ~CustomFilters.blacklisted))
     bot.add_handler(MessageHandler(stats, filters=command(
         BotCommands.StatsCommand) & CustomFilters.authorized & ~CustomFilters.blacklisted))
-    LOGGER.info(f"WZML-X Bot [@{bot_name}] Started!")
+    mode = "Scraper-only" if SCRAPER_ONLY else "WZML-X"
+    LOGGER.info(f"{mode} Bot [@{bot_name}] Started!")
     if user:
         LOGGER.info(f"WZ's User [@{user.me.username}] Ready!")
     signal(SIGINT, exit_clean_up)
