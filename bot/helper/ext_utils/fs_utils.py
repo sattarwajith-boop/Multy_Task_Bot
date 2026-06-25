@@ -9,7 +9,7 @@ from subprocess import run as srun
 from sys import exit as sexit
 
 from .exceptions import NotSupportedExtractionArchive
-from bot import aria2, LOGGER, DOWNLOAD_DIR, get_client, GLOBAL_EXTENSION_FILTER
+from bot import aria2, LOGGER, DOWNLOAD_DIR, get_client, GLOBAL_EXTENSION_FILTER, SCRAPER_ONLY
 from bot.helper.ext_utils.bot_utils import sync_to_async, cmd_exec
 
 ARCH_EXT = [".tar.bz2", ".tar.gz", ".bz2", ".gz", ".tar.xz", ".tar", ".tbz2", ".tgz", ".lzma2",
@@ -59,7 +59,8 @@ async def clean_download(path):
 
 
 async def start_cleanup():
-    get_client().torrents_delete(torrent_hashes="all")
+    if not SCRAPER_ONLY:
+        get_client().torrents_delete(torrent_hashes="all")
     try:
         await aiormtree(DOWNLOAD_DIR)
     except Exception:
@@ -68,8 +69,10 @@ async def start_cleanup():
 
 
 def clean_all():
-    aria2.remove_all(True)
-    get_client().torrents_delete(torrent_hashes="all")
+    if not SCRAPER_ONLY:
+        if aria2:
+            aria2.remove_all(True)
+        get_client().torrents_delete(torrent_hashes="all")
     try:
         rmtree(DOWNLOAD_DIR)
     except Exception:
@@ -81,7 +84,8 @@ def exit_clean_up(signal, frame):
         LOGGER.info(
             "Please wait, while we clean up and stop the running downloads")
         clean_all()
-        srun(['pkill', '-9', '-f', 'gunicorn|aria2c|qbittorrent-nox|ffmpeg'])
+        pattern = 'gunicorn|ffmpeg' if SCRAPER_ONLY else 'gunicorn|aria2c|qbittorrent-nox|ffmpeg'
+        srun(['pkill', '-9', '-f', pattern])
         sexit(0)
     except KeyboardInterrupt:
         LOGGER.warning("Force Exiting before the cleanup finishes!")
